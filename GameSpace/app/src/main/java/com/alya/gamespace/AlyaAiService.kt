@@ -109,10 +109,28 @@ class AlyaAiService : Service(), PanelCallbacks {
     private var bannerIcon: IconView? = null
     private val bannerHide = Runnable { hideBanner() }
     private var consent: View? = null
-    private val recListener: () -> Unit = { mainH.post { panel?.sync() } }
+    private val recListener: () -> Unit = { mainH.post { panel?.sync(); applyRecKnob() } }
 
     // ringkasan sesi
     private var sessStart = 0L
+    private var playBase = 0L        // ms main nonstop sebelum sesi sekarang (jeda < 5 menit dianggap satu sesi)
+    private var lastLeaveAt = 0L
+    // Tap Otomatis
+    private var atTarget: AutoTapTarget? = null
+    private var atTargetLp: WindowManager.LayoutParams? = null
+    private var atPill: AutoTapPill? = null
+    private var atPillLp: WindowManager.LayoutParams? = null
+    private val atRunner = AutoTapRunner { xs, ys, d -> ComboClient.tap(xs, ys, d) }
+    private var atPkg = ""
+    private var lastFg = ""
+    @Volatile private var atInApp = true
+    private var atLastUi = 0L
+    private var dragSx = 0f
+    private var dragSy = 0f
+    private var dragOx = 0
+    private var dragOy = 0
+    private var dragMoved = false
+    private var breakShown = 0       // berapa kali pengingat istirahat sudah muncul pada rentang main nonstop ini
     private var sessBat0 = -1
     private var sessBatNow = -1
     private var sessMaxTemp = 0f
@@ -166,6 +184,8 @@ class AlyaAiService : Service(), PanelCallbacks {
         Foreground.reset(); Stats.reset()
         ComboClient.bind(this)
         RecorderService.listeners.add(recListener)
+        NetWatch.start(this)
+        applyRecKnob()
         bgH.post { Hw.discover(this); mainH.post { refreshGpuUi() } }
         bgH.post(tick); bgH.post(watch); bgH.postDelayed(govTask, 4000); bgH.postDelayed(chargeTask, 3000)
         // sisa pembatasan app latar dari sesi yang crash: pulihkan bila tidak sedang main
@@ -225,6 +245,141 @@ class AlyaAiService : Service(), PanelCallbacks {
         if (show) announce(label + ": " + Logic.sessionText(dur, avg, sessMaxTemp, sessBat0, now), 0, Ic.FLAG)
     }
 
+    // ───────── indikator rekam (knob RGB) ─────────
+    private fun recRgbOn(): Boolean = RecorderService.recording && Prefs.bool(this, "knob_rgb", true)
+
+    /** Selama merekam layar: knob dipaksa tampil dan berwarna RGB; setelah selesai kembali seperti biasa. */
+    private fun applyRecKnob() {
+        if (recRgbOn()) {
+            if (knobView == null) showKnob()
+            knobView?.setRgb(true)
+        } else {
+            knobView?.setRgb(false)
+            if (knobView != null && game == null && !Prefs.bool(this, "always", false)) hideKnob()
+        }
+    }
+
+    // ───────── Tap Otomatis ─────────
+    private fun screenOn(): Boolean = (getSystemService(POWER_SERVICE) as android.os.PowerManager).isInteractive
+
+    /** Koreksi selisih posisi jendela overlay terhadap koordinat layar (inset/cutout), seperti tombol Combo. */
+    private fun alignWindow(v: View, lp: WindowManager.LayoutParams, wantX: Int, wantY: Int) {
+        v.post {
+            val loc = IntArray(2)
+            v.getLocationOnScreen(loc)
+            val dx = wantX - loc[0]; val dy = wantY - loc[1]
+            if (dx != 0 || dy != 0) { lp.x += dx; lp.y += dy; try { wm.updateViewLayout(v, lp) } catch (_: Throwable) {} }
+        }
+    }
+
+    private fun dragTouch(v: View, lp: WindowManager.LayoutParams, e: MotionEvent, onClick: (() -> Unit)?, onDrop: () -> Unit) {
+        when (e.actionMasked) {
+            MotionEvent.ACTION_DOWN -> { dragSx = e.rawX; dragSy = e.rawY; dragOx = lp.x; dragOy = lp.y; dragMoved = false; ownTouch() }
+            MotionEvent.ACTION_MOVE -> {
+                val dx = (e.rawX - dragSx).toInt(); val dy = (e.rawY - dragSy).toInt()
+                if (!dragMoved && Math.abs(dx) + Math.abs(dy) > dp(6)) dragMoved = true
+                if (dragMoved) { lp.x = dragOx + dx; lp.y = dragOy + dy; try { wm.updateViewLayout(v, lp) } catch (_: Throwable) {} }
+            }
+            MotionEvent.ACTION_UP -> { if (dragMoved) onDrop() else onClick?.invoke() }
+            MotionEvent.ACTION_CANCEL -> { if (dragMoved) onDrop() }
+        }
+    }
+
+    private fun showAutoTap() {
+        hideAutoTap()
+        if (st["atap"] != true) return
+        ComboClient.bind(this)
+        val sw = screenW(); val sh = screenH()
+        val key = comboKey()
+        val t = AutoTapStore.target(this, key, sw, sh)
+        val pl = AutoTapStore.pill(this, key, sw, sh)
+        val ts = dp(56)
+        val tg = AutoTapTarget(this)
+        val tlp = baseLp(ts, ts, fUi)
+        tlp.x = t[0] - ts / 2; tlp.y = t[1] - ts / 2
+        tg.setOnTouchListener { _, e -> dragTouch(tg, tlp, e, null) { saveAutoTarget() }; true }
+        try { wm.addView(tg, tlp) } catch (_: Throwable) { return }
+        atTarget = tg; atTargetLp = tlp
+        alignWindow(tg, tlp, t[0] - ts / 2, t[1] - ts / 2)
+        val pg = AutoTapPill(this)
+        val plp = baseLp(dp(92), dp(36), fUi)
+        plp.x = pl[0]; plp.y = pl[1]
+        pg.setOnTouchListener { _, e -> dragTouch(pg, plp, e, { atToggleRun() }) { saveAutoPill() }; true }
+        try { wm.addView(pg, plp) } catch (_: Throwable) { return }
+        atPill = pg; atPillLp = plp
+        alignWindow(pg, plp, pl[0], pl[1])
+    }
+
+    private fun hideAutoTap() {
+        atRunner.stop()
+        atTarget?.let { try { wm.removeView(it) } catch (_: Throwable) {} }
+        atPill?.let { try { wm.removeView(it) } catch (_: Throwable) {} }
+        atTarget = null; atTargetLp = null; atPill = null; atPillLp = null
+    }
+
+    private fun saveAutoTarget() {
+        val v = atTarget ?: return
+        val loc = IntArray(2); v.getLocationOnScreen(loc)
+        AutoTapStore.saveTarget(this, comboKey(), screenW(), screenH(), loc[0] + v.width / 2, loc[1] + v.height / 2)
+    }
+
+    private fun saveAutoPill() {
+        val v = atPill ?: return
+        val loc = IntArray(2); v.getLocationOnScreen(loc)
+        AutoTapStore.savePill(this, comboKey(), screenW(), screenH(), loc[0], loc[1])
+    }
+
+    private fun atToggleRun() {
+        if (atRunner.running) { atRunner.stop(); atFinish("dihentikan"); return }
+        if (!ComboClient.ready()) { toast("Tap Otomatis butuh Shizuku aktif dan diizinkan"); return }
+        val tg = atTarget ?: return
+        val pv = atPill ?: return
+        val tl = IntArray(2); tg.getLocationOnScreen(tl)
+        val x = tl[0] + tg.width / 2; val y = tl[1] + tg.height / 2
+        val pl = IntArray(2); pv.getLocationOnScreen(pl)
+        if (AutoTapLogic.overlaps(x, y, pl[0], pl[1], pv.width, pv.height, dp(8))) { toast("Geser lingkaran bidik menjauh dari tombol TAP"); return }
+        atPkg = game ?: lastFg
+        atInApp = true
+        val ms = Prefs.int(this, "at_ms", 500); val jit = Prefs.int(this, "at_jit", 0)
+        val down = Prefs.int(this, "at_down", 30); val lim = Prefs.int(this, "at_limit", 0)
+        tg.running = true; tg.invalidate()
+        pv.running = true; pv.count = 0; pv.invalidate()
+        // saat berjalan jendela bidik tembus sentuhan; opasitas jendela <= 0,8 supaya Android 12+ tidak memblokir ketukan yang melewatinya
+        atTargetLp?.let { lp -> lp.flags = fPass; lp.alpha = 0.6f; try { wm.updateViewLayout(tg, lp) } catch (_: Throwable) {} }
+        ActionLog.add("Tap Otomatis mulai di " + x + "," + y + " tiap " + ms + " ms (acak " + jit + "%, sentuh " + down + " ms, batas " + lim + " mnt)")
+        atRunner.start(x, y, ms, jit, down,
+            { el, n -> AutoTapLogic.stopReason(el, lim, n, 0, screenOn(), atInApp) },
+            { n ->
+                val now = android.os.SystemClock.uptimeMillis()
+                if (now - atLastUi > 80L) {
+                    atLastUi = now
+                    mainH.post { atTarget?.pulse(); atPill?.let { it.count = n; it.invalidate() } }
+                }
+            },
+            { why -> mainH.post { atFinish(why) } })
+    }
+
+    private fun atFinish(why: String) {
+        atTarget?.let { it.running = false; it.invalidate() }
+        atPill?.let { it.running = false; it.invalidate() }
+        val tg = atTarget; val lp = atTargetLp
+        if (tg != null && lp != null) { lp.flags = fUi; lp.alpha = 1f; try { wm.updateViewLayout(tg, lp) } catch (_: Throwable) {} }
+        ActionLog.add("Tap Otomatis berhenti: " + why)
+        if (why != "dihentikan") toast("Tap Otomatis berhenti: " + why)
+    }
+
+    /** Pengingat istirahat: tiap kelipatan waktu main nonstop (diatur di Info), tampil sebagai banner di atas game. */
+    private fun checkBreak() {
+        val min = Prefs.int(this, "brk_min", 0)
+        if (min <= 0 || sessStart == 0L || game == null) return
+        val el = playBase + (System.currentTimeMillis() - sessStart)
+        val due = PlayLogic.breaksDue(el, min * 60_000L)
+        if (due > breakShown) {
+            breakShown = due
+            announce(PlayLogic.breakText(el), 1, Ic.CLOCK)
+        }
+    }
+
     // ───────── loop statistik, deteksi game, governor ─────────
     private val tick = object : Runnable {
         override fun run() {
@@ -238,6 +393,7 @@ class AlyaAiService : Service(), PanelCallbacks {
                 }
                 mainH.post { onSnap(s) }
             }
+            checkBreak()
             counter++
             bgH.postDelayed(this, 1000)
         }
@@ -367,14 +523,14 @@ class AlyaAiService : Service(), PanelCallbacks {
     private fun onSnap(s: Snap) {
         panel?.update(s, gameLabel, Hw.statusText())
         pcHud?.let { h ->
-            h.gpu = s.gpuLoad; h.cpu = s.cpuLoad; h.ram = s.ram; h.watt = s.watt; h.temp = s.temp; h.fps = s.fps
+            h.gpu = s.gpuLoad; h.cpu = s.cpuLoad; h.ram = s.ram; h.watt = s.watt; h.charging = s.charging; h.temp = s.temp; h.fps = s.fps
             h.renderer = rendererLabel
             h.push(if (s.fps > 0f) s.fps else 0f)
             h.invalidate()
         }
         hudView?.let { h ->
             h.fps = s.fps; h.cpu = s.cpuLoad; h.gpu = s.gpuLoad; h.ram = s.ram; h.bat = s.battery; h.ping = s.ping
-            h.charging = isCharging(); h.temp = s.temp; h.time = clockFmt.format(Date()); h.net = netType()
+            h.charging = isCharging(); h.temp = s.temp; h.time = clockFmt.format(Date()); h.net = NetWatch.label().let { if (it != NetLogic.NONE) it else netType() }
             h.invalidate()
         }
     }
@@ -383,6 +539,8 @@ class AlyaAiService : Service(), PanelCallbacks {
         p.contains("inputmethod") || p.contains("keyboard")
 
     private fun onForeground(fg: String) {
+        lastFg = fg
+        if (atRunner.running) atInApp = (fg == atPkg || ignored(fg))
         if (fg in Prefs.games(this)) { if (game != fg) enterGame(fg) }
         else if (game != null && !ignored(fg)) leaveGame()
     }
@@ -392,7 +550,11 @@ class AlyaAiService : Service(), PanelCallbacks {
         inGame = true
         gameLabel = try { packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString() } catch (_: Throwable) { pkg }
         curMode = modeFor(pkg); Skin.mode = curMode
+        val prevStart = sessStart
         sessStart = System.currentTimeMillis(); sessBat0 = batteryPct(); sessBatNow = sessBat0
+        if (prevStart != 0L) { playBase += sessStart - prevStart; lastLeaveAt = sessStart }   // pindah langsung antar game tetap satu rentang main
+        playBase = PlayLogic.resume(playBase, if (lastLeaveAt > 0L) sessStart - lastLeaveAt else Long.MAX_VALUE)
+        if (playBase == 0L) breakShown = 0
         sessMaxTemp = 0f; sessFpsSum = 0.0; sessFpsN = 0
         thermalLimited = false; idle = false; dimSaved = null; lastCap = -1; govCount = 0; notifExtra = ""
         lastTouch = System.currentTimeMillis(); watcherSeen = false
@@ -425,18 +587,19 @@ class AlyaAiService : Service(), PanelCallbacks {
         val g = game
         game = null
         inGame = false
+        if (sessStart != 0L) { val t = System.currentTimeMillis(); playBase += t - sessStart; lastLeaveAt = t }
         finishSession(true)
         closePanel(false)
-        hideHud(); hidePcHud(); hideWatcher(); hideCombo()
+        hideHud(); hidePcHud(); hideWatcher(); hideCombo(); hideAutoTap()
         editor?.close(); editor = null
         if (st["rec"] == true) bgH.post { stopRecord() }
-        for (id in listOf("hud", "hudpc", "rec", "cross", "srec", "dnd", "bright", "rot", "guard", "anim", "adaptive", "limit", "touch", "esport", "cpulock", "gpulock")) st[id] = false
+        for (id in listOf("hud", "hudpc", "rec", "cross", "srec", "dnd", "bright", "rot", "guard", "anim", "adaptive", "limit", "touch", "esport", "cpulock", "gpulock", "atap")) st[id] = false
         applyCross(); setGuard(false)
         visualSel = 0
         val wasIdle = idle
         val saved = dimSaved
         idle = false; dimSaved = null; thermalLimited = false; lastCap = -1
-        if (!Prefs.bool(this, "always", false)) hideKnob()
+        if (!Prefs.bool(this, "always", false) && !recRgbOn()) hideKnob()
         panel?.sync(); updateNotif()
         bgH.post {
             if (wasIdle && saved != null) actions.undim(saved)
@@ -495,6 +658,7 @@ class AlyaAiService : Service(), PanelCallbacks {
         val v = KnobView(this)
         v.blur = blur
         v.alone = hudView == null
+        v.setRgb(recRgbOn())
         val lp = baseLp(dp(40), dp(26), fUi)
         lp.x = knobX; lp.y = knobY
         attachTouch(v, true)
@@ -680,6 +844,7 @@ class AlyaAiService : Service(), PanelCallbacks {
         ui.setLevels(readBrightness(), a.getStreamVolume(AudioManager.STREAM_MUSIC), a.getStreamMaxVolume(AudioManager.STREAM_MUSIC))
         ui.setPc(Prefs.int(this, "pc_size", 130), Prefs.int(this, "pc_alpha", 55))
         ui.setCombo(Prefs.int(this, "c1_ms", 60), Prefs.int(this, "c2_ms", 80), comboStatusText())
+        ui.setAuto(Prefs.int(this, "at_ms", 500))
         refreshGpuUi()
         val lp = WindowManager.LayoutParams(w, WindowManager.LayoutParams.WRAP_CONTENT, overlayType, fUi, PixelFormat.TRANSLUCENT)
         lp.gravity = Gravity.END or Gravity.CENTER_VERTICAL
@@ -714,6 +879,7 @@ class AlyaAiService : Service(), PanelCallbacks {
         closePanel(false); panel = null
         layoutHud(); layoutPcHud()
         if (st["combo"] == true && game != null) showCombo()
+        if (st["atap"] == true) { val was = atRunner.running; showAutoTap(); if (was) toast("Tap Otomatis berhenti karena layar diputar") }
         if (wasOpen) openPanel()
     }
 
@@ -906,7 +1072,7 @@ class AlyaAiService : Service(), PanelCallbacks {
         consent = null
     }
 
-    private fun showComboConsent(onOk: () -> Unit, onCancel: () -> Unit) {
+    private fun showComboConsent(onOk: () -> Unit, onCancel: () -> Unit, auto: Boolean = false) {
         if (consent != null) return
         closePanel(false)
         val root = FrameLayout(this)
@@ -915,10 +1081,10 @@ class AlyaAiService : Service(), PanelCallbacks {
         card.orientation = LinearLayout.VERTICAL
         card.setPadding(dp(20), dp(16), dp(20), dp(16))
         card.background = rbox(0xF50B0A17.toInt(), dp(20).toFloat(), alpha(Pal.WARN, 190), dp(2))
-        val ct = tv("Peringatan fitur Combo", 16f, Pal.WARN, true)
+        val ct = tv(if (auto) "Peringatan fitur Tap Otomatis" else "Peringatan fitur Combo", 16f, Pal.WARN, true)
         ct.iconStart(Ic.WARN, 20, Pal.WARN, 8)
         card.addView(ct)
-        card.addView(tv("Combo adalah auto-tap (macro): menekan titik layar berulang saat tombol C1/C2 ditahan.\n\n" +
+        card.addView(tv(if (auto) AUTO_CONSENT else "Combo adalah auto-tap (macro): menekan titik layar berulang saat tombol C1/C2 ditahan.\n\n" +
             "•  Di game online (battle royale, MOBA, dll.) macro bisa melanggar aturan dan membuat akun di-ban oleh anti-cheat. Pakai di game offline atau game yang membolehkan.\n" +
             "•  Game Space tidak menyembunyikan Combo dari deteksi.\n" +
             "•  Semua risiko menjadi tanggung jawab pengguna.", 11.5f, Pal.TEXT),
@@ -1061,6 +1227,16 @@ class AlyaAiService : Service(), PanelCallbacks {
                     }, { })
                 } else { Prefs.setBool(this, "combo_on", on); if (on) showCombo() else hideCombo() }
             }
+            "atap" -> {
+                if (on && !Prefs.bool(this, "atap_ack", false)) {
+                    st["atap"] = false; panel?.sync()
+                    showComboConsent({
+                        Prefs.setBool(this, "atap_ack", true)
+                        st["atap"] = true; showAutoTap(); closePanel(); panel?.sync()
+                    }, { }, true)
+                } else if (on) { st["atap"] = true; showAutoTap(); closePanel() }
+                else { st["atap"] = false; hideAutoTap() }
+            }
             "c1" -> { Prefs.setBool(this, "c1_on", on); showCombo() }
             "c2" -> { Prefs.setBool(this, "c2_on", on); showCombo() }
             "cpulock" -> bgH.post {
@@ -1100,6 +1276,7 @@ class AlyaAiService : Service(), PanelCallbacks {
             "boost" -> bgH.post { val mb = actions.boost(game); actions.toast("RAM dibersihkan ± $mb MB") }
             "clean" -> bgH.post { val mb = actions.cleanCache(); if (mb >= 0) actions.toast("Cache dibersihkan ± $mb MB") }
             "cedit" -> startEdit()
+            "atrun" -> { if (st["atap"] != true) toast("Nyalakan Tap Otomatis dulu") else { closePanel(); mainH.postDelayed({ atToggleRun() }, 300) } }
             "pcreset" -> { Prefs.setInt(this, "pc_x", -1); Prefs.setInt(this, "pc_y", -1); layoutPcHud() }
             "hudreset" -> {
                 knobX = dp(110); knobY = dp(6)
@@ -1130,6 +1307,7 @@ class AlyaAiService : Service(), PanelCallbacks {
             "pcalpha" -> { Prefs.setInt(this, "pc_alpha", v); refreshPcHud() }
             "c1ms" -> Prefs.setInt(this, "c1_ms", v)
             "c2ms" -> Prefs.setInt(this, "c2_ms", v)
+            "atms" -> Prefs.setInt(this, "at_ms", v)
         }
     }
 
@@ -1138,9 +1316,10 @@ class AlyaAiService : Service(), PanelCallbacks {
     override fun onDestroy() {
         running = false
         RecorderService.listeners.remove(recListener)
+        NetWatch.stop()
         if (game != null) finishSession(false)
         bgH.removeCallbacksAndMessages(null)
-        closePanel(false); hideHud(); hidePcHud(); hideKnob(); hideWatcher(); hideCombo(); setGuard(false); hideBanner(); hideConsent()
+        closePanel(false); hideHud(); hidePcHud(); hideKnob(); hideWatcher(); hideCombo(); hideAutoTap(); setGuard(false); hideBanner(); hideConsent()
         editor?.close(); editor = null
         st["cross"] = false; applyCross()
         val g = game
@@ -1157,3 +1336,9 @@ class AlyaAiService : Service(), PanelCallbacks {
         super.onDestroy()
     }
 }
+
+private const val AUTO_CONSENT = "Tap Otomatis menekan satu titik layar berulang-ulang sampai kamu menghentikannya.\n\n" +
+    "•  Di game online (battle royale, MOBA, dll.) auto-tap bisa melanggar aturan dan membuat akun di-ban oleh anti-cheat. Pakai untuk mode cerita, farming offline, atau game yang membolehkan.\n" +
+    "•  Game Space tidak menyembunyikan Tap Otomatis dari deteksi.\n" +
+    "•  Berhenti sendiri saat keluar game atau layar mati, dan bisa dihentikan kapan saja lewat tombol TAP.\n" +
+    "•  Semua risiko menjadi tanggung jawab pengguna."

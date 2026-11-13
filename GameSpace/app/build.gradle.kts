@@ -9,8 +9,8 @@ android {
         applicationId = "com.alya.gamespace"
         minSdk = 26          // Android 8.0
         targetSdk = 36       // Android 16; jalan juga di 17+
-        versionCode = 8
-        versionName = "1.7"
+        versionCode = 10
+        versionName = "1.9"
     }
     buildTypes { release { isMinifyEnabled = false } }
     compileOptions {

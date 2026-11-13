@@ -72,6 +72,8 @@ class PanelUi(private val ctx: Context, private val cb: PanelCallbacks, val widt
     private lateinit var c2Lbl: TextView
     private lateinit var c1Seek: SeekBar
     private lateinit var c2Seek: SeekBar
+    private lateinit var atSeek: SeekBar
+    private lateinit var atLbl: TextView
     private lateinit var pcSizeLbl: TextView
     private lateinit var pcAlphaLbl: TextView
     private lateinit var pcSizeSeek: SeekBar
@@ -302,6 +304,14 @@ class PanelUi(private val ctx: Context, private val cb: PanelCallbacks, val widt
             "Posisi disimpan per game. Setelah Simpan, titik disembunyikan dan tombol tidak bisa bergeser.\n" +
             "Combo adalah auto-tap: pakai di game offline / yang membolehkan.", 9.5f, Pal.MUTED)
         col.addView(hint, lpTop(8))
+        col.addView(sec("Tap Otomatis (satu titik, jalan sendiri)"))
+        col.addView(tileRow(tile("atap", Ic.CROSSHAIR, "Tap Otomatis", true), tile("atrun", Ic.PLAY, "Mulai / Stop", false)), lpTop(6))
+        atLbl = ctx.tv("500 ms", 11f, Skin.a, true)
+        col.addView(atLbl, lpTop(2))
+        atSeek = seek(295, { cb.onSeek("atms", it * 10 + 50) }, { atLbl.text = (it * 10 + 50).toString() + " ms" })
+        col.addView(atSeek, lpTop(0))
+        col.addView(ctx.tv("Nyalakan Tap Otomatis, geser lingkaran bidik ke titik yang mau diketuk, lalu tekan tombol TAP (atau Mulai / Stop). " +
+            "Berhenti sendiri bila keluar game atau layar mati. Lama sentuh, acak, dan batas waktu diatur di dashboard (Info).", 9.5f, Pal.MUTED), lpTop(6))
         return sv
     }
 
@@ -424,7 +434,7 @@ class PanelUi(private val ctx: Context, private val cb: PanelCallbacks, val widt
         badge.text.text = Modes.all[curMode].name
         badge.icon.tint = Color.WHITE
         badge.box.background = gbox(Skin.a, Skin.b, dp(10).toFloat())
-        fpsBig.setTextColor(a); gpuLbl.setTextColor(a); c1Lbl.setTextColor(a); c2Lbl.setTextColor(a)
+        fpsBig.setTextColor(a); gpuLbl.setTextColor(a); c1Lbl.setTextColor(a); c2Lbl.setTextColor(a); atLbl.setTextColor(a)
         pcSizeLbl.setTextColor(a); pcAlphaLbl.setTextColor(a)
         for (t in tiles.values) t.refresh()
         for (s in seeks) {
@@ -456,6 +466,8 @@ class PanelUi(private val ctx: Context, private val cb: PanelCallbacks, val widt
         pcSizeSeek.progress = (size - 60).coerceIn(0, 140); pcSizeLbl.text = "Ukuran $size%"
         pcAlphaSeek.progress = alphaPct.coerceIn(0, 100); pcAlphaLbl.text = "Transparansi latar $alphaPct%"
     }
+
+    fun setAuto(ms: Int) { atSeek.progress = ((ms - 50) / 10).coerceIn(0, 295); atLbl.text = (atSeek.progress * 10 + 50).toString() + " ms" }
 
     fun setCombo(c1: Int, c2: Int, statusText: String) {
         c1Seek.progress = (c1 - 20).coerceIn(0, 280); c1Lbl.text = "$c1 ms"

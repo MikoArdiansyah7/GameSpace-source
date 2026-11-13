@@ -80,7 +80,9 @@ object Logic {
 
     // ───────── HUD Display gaya PC ─────────
     fun pcPct(v: Int): String = (if (v < 0) "--%" else v.coerceIn(0, 100).toString() + "%").padStart(4)
-    fun pcWatt(w: Float): String = (if (w < 0f) "--W" else (Math.round(w * 10) / 10.0).toString() + "W").padStart(5)
+    /** Daya baterai dengan tanda: + saat mengisi daya, - saat dipakai (tidak diketahui = --W). Selalu 7 karakter agar kolom tidak bergeser. */
+    fun pcWatt(w: Float, charging: Boolean = false): String =
+        (if (w < 0f) "--W" else (if (charging) "+" else "-") + (Math.round(w * 10) / 10.0).toString() + "W").padStart(7)
     fun pcTemp(t: Float): String = ((Math.round(t * 10) / 10.0).toString() + "°C").padStart(6)
     fun pcFps(f: Float): String = (if (f > 0f) f.toInt().toString() else "--").padStart(3)
 

@@ -50,6 +50,8 @@ class MainActivity : Activity() {
     private var openRec: String? = null
     private var pendingSlot = 0
     private val ins = intArrayOf(0, 0, 0, 0)
+    private var imeBottom = 0
+    private var bodyView: LinearLayout? = null
     private val apps = ArrayList<AppItem>()
     private val selected = LinkedHashSet<String>()
     private val permListener = Shizuku.OnRequestPermissionResultListener { _, _ -> runOnUiThread { render() } }
@@ -63,13 +65,22 @@ class MainActivity : Activity() {
         root.setBackgroundColor(Pal.BG0)
         root.setOnApplyWindowInsetsListener { _, i ->
             val n = IntArray(4)
+            var ime = 0
             if (Build.VERSION.SDK_INT >= 30) {
                 val x = i.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
                 n[0] = x.left; n[1] = x.top; n[2] = x.right; n[3] = x.bottom
+                ime = i.getInsets(WindowInsets.Type.ime()).bottom
             } else {
                 @Suppress("DEPRECATION") run { n[0] = i.systemWindowInsetLeft; n[1] = i.systemWindowInsetTop; n[2] = i.systemWindowInsetRight; n[3] = i.systemWindowInsetBottom }
             }
-            if (!n.contentEquals(ins)) { for (k in 0..3) ins[k] = n[k]; render() }
+            // perubahan inset (termasuk keyboard) hanya mengubah padding. Jangan membangun ulang halaman: kolom yang sedang diketik
+            // akan kehilangan fokus dan keyboard menutup sendiri.
+            if (!n.contentEquals(ins) || ime != imeBottom) {
+                for (k in 0..3) ins[k] = n[k]
+                imeBottom = ime
+                bodyView?.setPadding(ins[0], ins[1], ins[2], Math.max(ins[3], imeBottom))
+                if (ime > 0) focusIntoView()
+            }
             i
         }
         setContentView(root)
@@ -83,6 +94,7 @@ class MainActivity : Activity() {
     override fun onStart() {
         super.onStart()
         RecorderService.listeners.add(recListener)
+        Dex2oat.listeners.add(dexListener)
         // musik otomatis dari slot pilihan saat aplikasi dibuka
         if (Prefs.bool(this, "mus_auto", true) && !Music.userPaused) {
             if (Music.current >= 0) Music.resume()
@@ -98,6 +110,7 @@ class MainActivity : Activity() {
     override fun onStop() {
         super.onStop()
         RecorderService.listeners.remove(recListener)
+        Dex2oat.listeners.remove(dexListener)
         root.removeCallbacks(recTick)
         if (Music.playing) Music.pause()
     }
@@ -153,16 +166,50 @@ class MainActivity : Activity() {
     private fun lpTop(t: Int) = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(t) }
     private fun lpW(l: Int = 3) = LinearLayout.LayoutParams(0, -2, 1f).apply { setMargins(dp(l), 0, dp(l), 0) }
 
+    private var contentSv: ScrollView? = null
+    private var railSv: ScrollView? = null
+    private var lastPageKey = ""
+
+    /** Setelah keyboard muncul, gulirkan kolom yang sedang diisi ke area yang terlihat. */
+    private fun focusIntoView() {
+        root.postDelayed({
+            val f = currentFocus
+            if (f is EditText && f.isAttachedToWindow) f.requestRectangleOnScreen(android.graphics.Rect(0, 0, f.width, f.height), true)
+        }, 150)
+    }
+
+    private fun pageKey(): String = tab.toString() + "/" + (openRec ?: "")
+
+    /** Pulihkan posisi scroll setelah halaman dibangun ulang, sebelum frame pertama digambar (tanpa kedip ke atas). */
+    private fun restoreScroll(sv: ScrollView?, y: Int) {
+        if (sv == null || y <= 0) return
+        sv.viewTreeObserver.addOnPreDrawListener(object : android.view.ViewTreeObserver.OnPreDrawListener {
+            override fun onPreDraw(): Boolean {
+                val o = sv.viewTreeObserver
+                if (o.isAlive) o.removeOnPreDrawListener(this)
+                sv.scrollTo(0, y)
+                return true
+            }
+        })
+    }
+
     private fun render() {
+        // halaman yang sama dibangun ulang (mis. setelah mengganti pengaturan): tetap di posisi scroll sekarang; pindah halaman: mulai dari atas
+        val keepY = if (pageKey() == lastPageKey) (contentSv?.scrollY ?: 0) else 0
+        val keepRail = railSv?.scrollY ?: 0
+        lastPageKey = pageKey()
         root.removeAllViews()
         root.addView(backdrop(), FrameLayout.LayoutParams(-1, -1))
         val body = LinearLayout(this)
-        body.setPadding(ins[0], ins[1], ins[2], ins[3])
+        body.setPadding(ins[0], ins[1], ins[2], Math.max(ins[3], imeBottom))
+        bodyView = body
         body.addView(rail(), LinearLayout.LayoutParams(dp(80), -1))
         body.addView(content(), LinearLayout.LayoutParams(0, -1, 1f))
         root.removeCallbacks(recTick)
         if (tab == 2) root.postDelayed(recTick, 1000)
         root.addView(body, FrameLayout.LayoutParams(-1, -1))
+        restoreScroll(contentSv, keepY)
+        restoreScroll(railSv, keepRail)
     }
 
     private fun backdrop(): View {
@@ -179,13 +226,19 @@ class MainActivity : Activity() {
     }
 
     private fun rail(): View {
+        // rail bisa digeser atas-bawah: di layar landscape yang pendek, menu paling bawah dulu terpotong dan tidak terjangkau
+        val sv = ScrollView(this)
+        sv.isVerticalScrollBarEnabled = false
+        sv.overScrollMode = View.OVER_SCROLL_NEVER
+        sv.isFillViewport = true
+        railSv = sv
         val col = LinearLayout(this)
         col.orientation = LinearLayout.VERTICAL; col.gravity = Gravity.CENTER_HORIZONTAL
-        col.setPadding(dp(8), dp(14), dp(8), dp(14))
+        col.setPadding(dp(8), dp(10), dp(8), dp(10))
         col.setBackgroundColor(0x77050410)
         val logo = ImageView(this)
         logo.setImageResource(R.drawable.art_icon)
-        col.addView(logo, LinearLayout.LayoutParams(dp(48), dp(48)).apply { bottomMargin = dp(14) })
+        col.addView(logo, LinearLayout.LayoutParams(dp(48), dp(48)).apply { bottomMargin = dp(10) })
         val items = listOf(Pair(Ic.HOME, "Beranda"), Pair(Ic.GAMES, "Game"), Pair(Ic.VIDEO, "Rekam"), Pair(Ic.CHART, "Laporan"), Pair(Ic.GEAR, "Info"))
         for (i in items.indices) {
             val v = LinearLayout(this)
@@ -197,12 +250,14 @@ class MainActivity : Activity() {
             v.setOnClickListener { tab = i; openRec = null; render() }
             col.addView(v, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(4) })
         }
-        return col
+        sv.addView(col, FrameLayout.LayoutParams(-1, -2))
+        return sv
     }
 
     private fun content(): View {
         val sv = ScrollView(this)
         sv.isVerticalScrollBarEnabled = false
+        contentSv = sv
         val page = when (tab) { 0 -> pageHome(); 1 -> pageGames(); 2 -> pageRecord(); 3 -> pageRecords(); else -> pageInfo() }
         sv.addView(page, FrameLayout.LayoutParams(-1, -2))
         return sv
@@ -351,15 +406,27 @@ class MainActivity : Activity() {
         return t
     }
 
+    /** startActivity yang tidak membuat app crash di ROM yang tidak punya layar pengaturan tersebut (Xiaomi, Oppo, Android Go, dll). */
+    private fun safeStart(i: Intent, fallback: Intent? = null, hint: String = "") {
+        try { startActivity(i); return } catch (_: Throwable) {}
+        if (fallback != null) {
+            try { startActivity(fallback); if (hint.isNotEmpty()) Toast.makeText(this, hint, Toast.LENGTH_LONG).show(); return } catch (_: Throwable) {}
+        }
+        Toast.makeText(this, "Layar pengaturan ini tidak tersedia di HP kamu", Toast.LENGTH_LONG).show()
+    }
+
+    private fun appDetails() = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))
+
     private fun permissions(): View {
         val col = LinearLayout(this)
         col.orientation = LinearLayout.VERTICAL
         val r1 = LinearLayout(this); val r2 = LinearLayout(this)
         r1.addView(permChip("Tampil di atas app", Settings.canDrawOverlays(this)) {
-            startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
+            safeStart(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")), appDetails(),
+                "Buka Izin > 'Tampil di atas aplikasi lain' lalu izinkan Game Space")
         }, lpW(0))
         r1.addView(permChip("Akses penggunaan", Perm.usage(this) || ShizukuHelper.granted()) {
-            startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
+            safeStart(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS), appDetails(), "Cari 'Akses penggunaan' (Special app access) di Pengaturan lalu izinkan Game Space")
         }, lpW(6))
         val notifOk = Build.VERSION.SDK_INT < 33 || checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
         r2.addView(permChip("Notifikasi", notifOk) { requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1) }, lpW(0))
@@ -368,7 +435,7 @@ class MainActivity : Activity() {
         r2.addView(permChip(shz, ShizukuHelper.granted()) {
             if (!ShizukuHelper.running()) {
                 val i = packageManager.getLaunchIntentForPackage("moe.shizuku.privileged.api")
-                if (i != null) startActivity(i) else Toast.makeText(this, "Install dan jalankan Shizuku dulu", Toast.LENGTH_LONG).show()
+                if (i != null) safeStart(i) else Toast.makeText(this, "Install dan jalankan Shizuku dulu", Toast.LENGTH_LONG).show()
             } else ShizukuHelper.request()
         }, lpW(6))
         col.addView(r1); col.addView(r2, lpTop(6))
@@ -520,6 +587,7 @@ class MainActivity : Activity() {
         if (apps.isEmpty()) { col.addView(tv("Memuat daftar aplikasi...", 12f, Pal.MUTED), lpTop(14)); return col }
         val lib = ArrayList<AppItem>()
         for (a in apps) if (a.pkg in selected) lib.add(a)
+        if (lib.isNotEmpty()) col.addView(dexCard(lib), lpTop(12))
         col.addView(sectionTitle("Perpustakaan"), lpTop(12))
         if (lib.isEmpty()) col.addView(tv("Belum ada game. Pilih dari daftar di bawah.", 11f, Pal.MUTED), lpTop(4))
         for (a in lib) col.addView(libRow(a), lpTop(6))
@@ -551,8 +619,10 @@ class MainActivity : Activity() {
         val s = Prefs.int(this, "gfx_s_" + a.pkg, 100)
         t.addView(tv("Renderer: " + Gfx.names[r.coerceIn(0, 3)] + "  •  Resolusi: " + s + "%", 10.5f, Pal.MUTED))
         t.addView(gameModeRow(a.pkg), lpTop(5))
+        t.addView(dexLine(a), lpTop(4))
         row.addView(t, LinearLayout.LayoutParams(0, -2, 1f))
         row.addView(btn("", false, Ic.GEAR) { gameDialog(a) }, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(6) })
+        row.addView(btn("", false, Ic.ZAP) { dexConfirm(listOf(a), false) }, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(6) })
         row.addView(btn("Main", true, Ic.PLAY) { playGame(a.pkg) })
         c.addView(row)
         return c
@@ -662,7 +732,8 @@ class MainActivity : Activity() {
             runOnUiThread {
                 if (!AlyaAiService.running) startForegroundService(Intent(this, AlyaAiService::class.java))
                 val li = packageManager.getLaunchIntentForPackage(pkg)
-                if (li != null) startActivity(li) else Toast.makeText(this, "Game tidak bisa dibuka", Toast.LENGTH_SHORT).show()
+                if (li != null) { try { startActivity(li) } catch (_: Throwable) { Toast.makeText(this, "Game tidak bisa dibuka", Toast.LENGTH_SHORT).show() } }
+                else Toast.makeText(this, "Game tidak bisa dibuka", Toast.LENGTH_SHORT).show()
                 if (notes.isNotEmpty()) Toast.makeText(this, notes.joinToString("\n"), Toast.LENGTH_LONG).show()
             }
             if (ShizukuHelper.granted() && eff != 0) {
@@ -701,7 +772,8 @@ class MainActivity : Activity() {
             openRec = null
         }
         val col = pageCol()
-        col.addView(pageTitle("Laporan Performa", "Laporan FPS dan suhu dari sesi game"))
+        col.addView(pageTitle("Laporan Performa", "Waktu bermain, laporan FPS dan suhu dari sesi game"))
+        col.addView(playStatsCard(), lpTop(12))
         if (list.isEmpty()) {
             val c = card(18)
             c.gravity = Gravity.CENTER
@@ -855,6 +927,13 @@ class MainActivity : Activity() {
         set.addView(switchRow("Pulihkan setelan saat keluar game", "Kembalikan semua yang diubah Game Space", "auto_restore", true))
         set.addView(switchRow("Selalu tampilkan knob (uji coba)", "Knob/HUD muncul walau tidak sedang di game", "always", false))
         set.addView(switchRow("Mulai otomatis saat HP menyala", "Layanan siap tanpa membuka aplikasi (Shizuku tetap perlu dinyalakan)", "boot_start", false))
+        set.addView(switchRow("Knob berwarna RGB saat merekam layar", "Knob (tombol panel Space) berganti warna dan tetap tampil selama perekaman layar berjalan, supaya kelihatan sekilas bahwa sedang merekam", "knob_rgb", true))
+        set.addView(tv("Pengingat istirahat (menit)", 12.5f, Pal.TEXT, true), lpTop(12))
+        val brkVals = intArrayOf(0, 30, 45, 60, 90, 120)
+        val brkCur = brkVals.indexOf(Prefs.int(this, "brk_min", 0)).let { if (it < 0) 0 else it }
+        set.addView(pills(listOf("Mati", "30", "45", "60", "90", "120"), brkCur) { Prefs.setInt(this, "brk_min", brkVals[it]); render() }, lpTop(6))
+        set.addView(sNote(if (brkCur == 0) "Mati. Pilih selang waktu supaya muncul banner pengingat di atas game saat kamu main nonstop terlalu lama."
+            else "Banner pengingat muncul tiap " + brkVals[brkCur] + " menit main nonstop. Keluar game kurang dari 5 menit tidak mengulang hitungan."), lpTop(6))
         col.addView(set, lpTop(10))
 
         val photo = card(14)
@@ -879,6 +958,7 @@ class MainActivity : Activity() {
         col.addView(chargeCard(), lpTop(10))
         col.addView(bgCard(), lpTop(10))
         col.addView(comboCard(), lpTop(10))
+        col.addView(autoTapCard(), lpTop(10))
 
         val tools = card(14)
         tools.addView(sectionTitle("Alat"))
@@ -1224,6 +1304,7 @@ class MainActivity : Activity() {
         val col = pageCol()
         col.addView(pageTitle("Perekam Layar", "Atur video dan audio, lalu mulai merekam. Berlaku juga untuk tombol Rekam Layar di panel Space"))
         col.addView(recControlCard(), lpTop(12))
+        col.addView(recLibraryCard(), lpTop(10))
         col.addView(recVideoCard(), lpTop(10))
         col.addView(recAudioCard(), lpTop(10))
         col.addView(recFileCard(), lpTop(10))
@@ -1242,6 +1323,7 @@ class MainActivity : Activity() {
         recStatusTv = st
         t.addView(st)
         t.addView(tv("Saat mulai, Android meminta izin rekam layar. Pilih 'Seluruh layar' agar game ikut terekam. Arah video (tegak/mendatar) mengikuti arah layar saat rekaman dimulai, jadi paling pas dimulai dari tombol Rekam Layar di panel saat sudah di dalam game. Apa pun yang tampil di layar (termasuk kapsul dan HUD) ikut terekam.", 10.5f, Pal.MUTED), lpTop(2))
+        t.addView(tv("Tips: tambahkan tile 'Rekam Layar' di Pengaturan Cepat (tarik panel notifikasi, ikon pensil) untuk mulai atau berhenti merekam tanpa membuka aplikasi. Selama merekam, knob panel Space berganti warna RGB (bisa dimatikan di Info).", 10.5f, Skin.a), lpTop(4))
         row.addView(t, LinearLayout.LayoutParams(0, -2, 1f))
         row.addView(btn(if (rec) "Berhenti" else "Mulai rekam", !rec, if (rec) Ic.STOP else Ic.RECORD) {
             if (RecorderService.recording) RecorderService.requestStop(this) else startActivity(Intent(this, ProjectionActivity::class.java))
@@ -1391,6 +1473,328 @@ class MainActivity : Activity() {
         try { startActivityForResult(i, REQ_DIR) } catch (_: Throwable) { Toast.makeText(this, "Tidak ada pemilih folder", Toast.LENGTH_SHORT).show() }
     }
 
+    // ───────── statistik waktu bermain ─────────
+    private var statsCache: List<PlayLogic.Day>? = null
+    private var statsAt = 0L
+
+    private fun appLabel(pkg: String): String =
+        try { packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString() } catch (_: Throwable) { pkg }
+
+    private fun playStatsCard(): View {
+        val c = card(14)
+        val head = tv("Waktu bermain", 13f, Pal.TEXT, true)
+        head.iconStart(Ic.CLOCK, 16, Skin.a, 8)
+        c.addView(head)
+        if (!Perm.usage(this)) {
+            c.addView(sNote("Butuh izin 'Akses penggunaan' supaya Game Space bisa menghitung berapa lama kamu main."), lpTop(6))
+            c.addView(btn("Beri izin", true, Ic.LOCK) { safeStart(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS), appDetails(), "Cari 'Akses penggunaan' (Special app access) di Pengaturan lalu izinkan Game Space") }, lpTop(8))
+            return c
+        }
+        if (Prefs.games(this).isEmpty()) {
+            c.addView(sNote("Belum ada game di perpustakaan. Tambahkan game di tab Game, lalu waktu mainnya dihitung di sini."), lpTop(6))
+            return c
+        }
+        val body = LinearLayout(this)
+        body.orientation = LinearLayout.VERTICAL
+        c.addView(body, lpTop(6))
+        val cached = statsCache
+        if (cached != null) fillStats(body, cached) else body.addView(sNote("Memuat..."))
+        if (cached == null || System.currentTimeMillis() - statsAt > 20_000L) {
+            Thread {
+                val d = PlayStats.week(this, Prefs.games(this))
+                if (d != null) {
+                    statsCache = d; statsAt = System.currentTimeMillis()
+                    runOnUiThread { if (!isFinishing && tab == 3) fillStats(body, d) }
+                }
+            }.start()
+        }
+        return c
+    }
+
+    private fun fillStats(body: LinearLayout, days: List<PlayLogic.Day>) {
+        body.removeAllViews()
+        val tz = java.util.TimeZone.getDefault()
+        val week = PlayLogic.weekTotal(days)
+        fun big(label: String, v: String, color: Int): View {
+            val col = LinearLayout(this)
+            col.orientation = LinearLayout.VERTICAL
+            col.addView(tv(v, 22f, color, true))
+            col.addView(tv(label, 10f, Pal.MUTED))
+            return col
+        }
+        val nums = LinearLayout(this)
+        nums.addView(big("Hari ini", PlayLogic.fmt(days.last().total), Skin.a), lpW(0))
+        nums.addView(big("7 hari terakhir", PlayLogic.fmt(week), Pal.TEXT), lpW(0))
+        nums.addView(big("Rata-rata per hari", PlayLogic.fmt(week / days.size), Pal.TEXT), lpW(0))
+        body.addView(nums)
+
+        val fr = PlayLogic.barFractions(days)
+        val maxH = dp(70)
+        val bars = LinearLayout(this)
+        bars.gravity = Gravity.BOTTOM
+        for (i in days.indices) {
+            val isToday = i == days.size - 1
+            val col = LinearLayout(this)
+            col.orientation = LinearLayout.VERTICAL
+            col.gravity = Gravity.CENTER_HORIZONTAL
+            val h = if (fr[i] <= 0f) dp(3) else Math.max(dp(4), (maxH * fr[i]).toInt())
+            val bar = View(this)
+            bar.background = if (fr[i] <= 0f) rbox(0x22FFFFFF, dpf(3))
+                else if (isToday) gbox(Skin.a, Skin.b, dpf(5), GradientDrawable.Orientation.BOTTOM_TOP)
+                else rbox(alpha(Skin.a, 0x80), dpf(5))
+            val v = tv(if (days[i].total > 0L) PlayLogic.fmt(days[i].total) else "", 9f, Pal.MUTED)
+            v.gravity = Gravity.CENTER; v.maxLines = 1
+            col.addView(v)
+            col.addView(bar, LinearLayout.LayoutParams(dp(20), h).apply { topMargin = dp(2); bottomMargin = dp(3) })
+            val d = tv(if (isToday) "Ini" else PlayLogic.dayName(days[i].start, tz), 10f, if (isToday) Skin.a else Pal.MUTED, isToday)
+            d.gravity = Gravity.CENTER
+            col.addView(d)
+            bars.addView(col, LinearLayout.LayoutParams(0, -2, 1f))
+        }
+        body.addView(bars, lpTop(12))
+
+        val top = PlayLogic.top(days, 5)
+        if (top.isEmpty()) {
+            body.addView(sNote("Belum ada waktu main tercatat dalam 7 hari terakhir. Mainkan game dari perpustakaan, lalu cek lagi di sini."), lpTop(10))
+            return
+        }
+        body.addView(tv("Paling sering dimainkan (7 hari)", 11.5f, Pal.TEXT, true), lpTop(14))
+        val maxMs = Math.max(1L, top[0].second)
+        for ((pkg, ms) in top) {
+            val row = LinearLayout(this)
+            row.gravity = Gravity.CENTER_VERTICAL
+            val img = ImageView(this)
+            try { img.setImageDrawable(packageManager.getApplicationIcon(pkg)) } catch (_: Throwable) { img.setImageResource(R.drawable.art_icon) }
+            row.addView(img, LinearLayout.LayoutParams(dp(26), dp(26)).apply { rightMargin = dp(10) })
+            val mid = LinearLayout(this)
+            mid.orientation = LinearLayout.VERTICAL
+            val name = tv(appLabel(pkg), 11.5f, Pal.TEXT, true)
+            name.maxLines = 1; name.ellipsize = TextUtils.TruncateAt.END
+            mid.addView(name)
+            val wFill = Math.max(1, (1000L * ms / maxMs).toInt())
+            val track = LinearLayout(this)
+            track.background = rbox(0x22FFFFFF, dpf(3))
+            val fill = View(this)
+            fill.background = gbox(Skin.a, Skin.b, dpf(3))
+            track.addView(fill, LinearLayout.LayoutParams(0, dp(5), wFill.toFloat()))
+            track.addView(View(this), LinearLayout.LayoutParams(0, dp(5), Math.max(0, 1000 - wFill).toFloat()))
+            mid.addView(track, lpTop(4))
+            row.addView(mid, LinearLayout.LayoutParams(0, -2, 1f))
+            val t = tv(PlayLogic.fmt(ms), 11.5f, Pal.TEXT, true)
+            t.setPadding(dp(10), 0, 0, 0)
+            row.addView(t)
+            body.addView(row, lpTop(8))
+        }
+    }
+
+    // ───────── Rekaman saya ─────────
+    private var libCache: List<RecItem>? = null
+
+    private fun recLibraryCard(): View {
+        val c = card(14)
+        val head = tv("Rekaman saya", 13f, Pal.TEXT, true)
+        head.iconStart(Ic.FILM, 16, Skin.a, 8)
+        c.addView(head)
+        val sum = sNote("Memuat...")
+        c.addView(sum, lpTop(2))
+        val body = LinearLayout(this)
+        body.orientation = LinearLayout.VERTICAL
+        c.addView(body, lpTop(6))
+        val cached = libCache
+        if (cached != null) fillLib(body, sum, cached)
+        Thread {
+            val items = RecLibrary.list(this)
+            libCache = items
+            runOnUiThread { if (!isFinishing && tab == 2) fillLib(body, sum, items) }
+        }.start()
+        return c
+    }
+
+    private fun fillLib(body: LinearLayout, sum: TextView, all: List<RecItem>) {
+        body.removeAllViews()
+        // berkas yang sedang direkam belum utuh: sembunyikan sampai selesai
+        val items = if (RecorderService.recording) all.filter { System.currentTimeMillis() - it.dateMs > 15_000L } else all
+        var total = 0L
+        for (r in items) total += r.size
+        if (items.isEmpty()) {
+            sum.text = "Belum ada rekaman"
+            body.addView(sNote("Tekan 'Mulai rekam' di atas. Video yang sudah selesai muncul di sini dan bisa diputar, dibagikan, atau dihapus."))
+            return
+        }
+        sum.text = items.size.toString() + " video  •  " + RecLibLogic.sizeText(total) + "  •  " + RecStorage.label(this)
+        for (r in items.take(12)) body.addView(libRow(r), lpTop(8))
+        if (items.size > 12) body.addView(sNote("dan " + (items.size - 12) + " video lain di folder yang sama"), lpTop(8))
+    }
+
+    private fun libRow(r: RecItem): View {
+        val row = LinearLayout(this)
+        row.gravity = Gravity.CENTER_VERTICAL
+        row.setPadding(dp(12), dp(6), dp(6), dp(6))
+        row.background = rbox(0x14FFFFFF, dpf(12), 0x22FFFFFF, 1)
+        val t = LinearLayout(this)
+        t.orientation = LinearLayout.VERTICAL
+        t.addView(tv(RecLibLogic.title(r.name), 12f, Pal.TEXT, true))
+        t.addView(tv(RecLibLogic.sizeText(r.size) + "  •  " + RecLibLogic.durText(r.durMs), 10.5f, Pal.MUTED))
+        row.addView(t, LinearLayout.LayoutParams(0, -2, 1f))
+        fun act(icon: Int, color: Int, click: () -> Unit) {
+            val iv = IconView(this, icon, color)
+            iv.setPadding(dp(9), dp(9), dp(9), dp(9))
+            iv.setOnClickListener { click() }
+            row.addView(iv, LinearLayout.LayoutParams(dp(42), dp(42)))
+        }
+        act(Ic.PLAY, Skin.a) { openRec(r) }
+        act(Ic.LINK, Pal.TEXT) { shareRec(r) }
+        act(Ic.TRASH, Pal.BAD) { askDelete(r) }
+        return row
+    }
+
+    private fun openRec(r: RecItem) {
+        val i = RecLibrary.openIntent(r)
+        if (i == null) { Toast.makeText(this, "Buka lewat aplikasi Files/Galeri: " + (r.file?.path ?: r.name), Toast.LENGTH_LONG).show(); return }
+        try { startActivity(i) } catch (_: Throwable) { Toast.makeText(this, "Tidak ada pemutar video", Toast.LENGTH_SHORT).show() }
+    }
+
+    private fun shareRec(r: RecItem) {
+        val i = RecLibrary.shareIntent(r)
+        if (i == null) { Toast.makeText(this, "Di Android ini, bagikan lewat aplikasi Files: " + (r.file?.path ?: r.name), Toast.LENGTH_LONG).show(); return }
+        try { startActivity(i) } catch (_: Throwable) { Toast.makeText(this, "Tidak ada aplikasi untuk berbagi", Toast.LENGTH_SHORT).show() }
+    }
+
+    private fun askDelete(r: RecItem) {
+        AlertDialog.Builder(this).setTitle("Hapus rekaman?")
+            .setMessage(RecLibLogic.title(r.name) + "\n" + RecLibLogic.sizeText(r.size) + "\n\nVideo dihapus permanen.")
+            .setNegativeButton("Batal", null)
+            .setPositiveButton("Hapus") { _, _ ->
+                Thread {
+                    val ok = RecLibrary.delete(this, r)
+                    runOnUiThread {
+                        Toast.makeText(this, if (ok) "Rekaman dihapus" else "Gagal menghapus. Hapus lewat Galeri atau Files", Toast.LENGTH_SHORT).show()
+                        libCache = null
+                        render()
+                    }
+                }.start()
+            }.show()
+    }
+
+    private fun copyText(label: String, text: String) {
+        (getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager).setPrimaryClip(android.content.ClipData.newPlainText(label, text))
+        Toast.makeText(this, "Tersalin ke clipboard", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun shareText(title: String, text: String) {
+        val i = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_SUBJECT, title).putExtra(Intent.EXTRA_TEXT, text)
+        try { startActivity(Intent.createChooser(i, title)) } catch (_: Throwable) { Toast.makeText(this, "Tidak ada aplikasi untuk berbagi", Toast.LENGTH_SHORT).show() }
+    }
+
+    // ───────── dex2oat ─────────
+    private val dexListener: () -> Unit = { runOnUiThread { if (tab == 1 && !isFinishing) render() } }
+    @Volatile private var dexRefreshing = false
+
+    /** Baca status dex2oat tiap game di latar (paling sering sekali per menit). */
+    private fun refreshDexIfStale(pkgs: Collection<String>) {
+        if (!Sh.granted() || Dex2oat.running || dexRefreshing) return
+        if (System.currentTimeMillis() - Dex2oat.statusAt < 60_000L) return
+        dexRefreshing = true
+        Thread { try { Dex2oat.refreshStatus(pkgs) } finally { dexRefreshing = false } }.start()
+    }
+
+    private fun batteryNow(): Pair<Int, Boolean> {
+        val b = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val lv = b?.getIntExtra("level", -1) ?: -1
+        val sc = b?.getIntExtra("scale", 100) ?: 100
+        val stt = b?.getIntExtra("status", -1) ?: -1
+        return Pair(if (lv >= 0 && sc > 0) lv * 100 / sc else -1, stt == 2 || stt == 5)
+    }
+
+    private fun dexCard(lib: List<AppItem>): View {
+        refreshDexIfStale(lib.map { it.pkg })
+        val c = card(14)
+        val head = tv("Optimasi dex2oat", 13f, Pal.TEXT, true)
+        head.iconStart(Ic.ZAP, 16, Skin.a, 8)
+        c.addView(head)
+        c.addView(sNote("Mengompilasi kode game di muka, jadi tidak dikompilasi sambil main. Biasanya loading lebih cepat dan patah-patah di awal berkurang. " +
+            "Pengaruh ke FPS tergantung game: game yang kodenya sebagian besar native (Unity, Unreal) merasakan efek lebih kecil."), lpTop(4))
+        if (!Sh.granted()) {
+            c.addView(tv("Butuh Shizuku aktif dan diizinkan.", 11f, Pal.WARN, true), lpTop(8))
+            return c
+        }
+        val mode = Prefs.int(this, "dex_mode", 1).coerceIn(0, Dex2oatLogic.MODES.size - 1)
+        c.addView(pillGrid(Dex2oatLogic.MODES.map { it.label }, mode, 3) { Prefs.setInt(this, "dex_mode", it); render() }, lpTop(10))
+        c.addView(sNote(Dex2oatLogic.MODES[mode].note), lpTop(6))
+        val running = Dex2oat.running
+        val row = LinearLayout(this)
+        if (running) {
+            row.addView(btn("Berhenti", true, Ic.STOP) { Dex2oat.stop() }, lpW(3))
+        } else {
+            row.addView(btn("Optimasi semua game", true, Ic.ZAP) { dexConfirm(lib, false) }, lpW(3))
+            row.addView(btn("Reset ke bawaan", false, Ic.REFRESH) { dexConfirm(lib, true) }, lpW(3))
+        }
+        c.addView(row, lpTop(10))
+        val msg = if (running) Dex2oat.progress else Dex2oat.lastSummary
+        if (msg.isNotEmpty()) c.addView(tv(msg, 11f, if (running) Skin.a else Pal.TEXT, true), lpTop(8))
+        c.addView(sNote("Sebaiknya sambil dicas dan saat tidak main; HP bisa hangat beberapa menit. Efek terasa setelah game ditutup paksa lalu dibuka lagi. " +
+            "Android juga mengoptimasi sendiri di malam hari, jadi mode Speed paling terasa pada game yang baru dipasang atau baru diperbarui."), lpTop(8))
+        return c
+    }
+
+    private fun dexLine(a: AppItem): TextView {
+        val s = Dex2oat.status[a.pkg]
+        val txt = if (!Sh.granted()) "dex2oat: butuh Shizuku" else "dex2oat: " + Dex2oatLogic.statusText(s)
+        val col = if (s == null) Pal.MUTED else when (Dex2oatLogic.level(s.filter)) { 2 -> Pal.OK; 1 -> Pal.WARN; else -> Pal.MUTED }
+        val t = tv(txt, 10f, col, s != null)
+        t.maxLines = 1; t.ellipsize = TextUtils.TruncateAt.END
+        return t
+    }
+
+    private fun dexConfirm(items: List<AppItem>, reset: Boolean) {
+        if (Dex2oat.running) { Toast.makeText(this, "Optimasi sedang berjalan", Toast.LENGTH_SHORT).show(); return }
+        val (pct, chg) = batteryNow()
+        val warn = if (reset) null else Dex2oatLogic.warning(pct, chg, false)
+        val mode = Dex2oatLogic.MODES[Prefs.int(this, "dex_mode", 1).coerceIn(0, Dex2oatLogic.MODES.size - 1)]
+        val names = items.joinToString(", ") { it.label }
+        val msg = if (reset) "Kembalikan " + items.size + " game (" + names + ") ke kompilasi bawaan sistem?"
+            else "Optimasi " + items.size + " game (" + names + ") dengan mode " + mode.label + "?\n\nProses bisa makan beberapa menit per game."
+        AlertDialog.Builder(this).setTitle(if (reset) "Reset dex2oat" else "Optimasi dex2oat")
+            .setMessage(if (warn != null) msg + "\n\n" + warn else msg)
+            .setNegativeButton("Batal", null)
+            .setPositiveButton(if (warn != null) "Tetap lanjut" else "Mulai") { _, _ ->
+                val pairs = items.map { Pair(it.pkg, it.label) }
+                if (reset) Dex2oat.reset(pairs) else Dex2oat.start(pairs, mode.flag)
+                render()
+            }.show()
+    }
+
+    // ───────── Tap Otomatis: pengaturan ─────────
+    private fun autoTapCard(): View {
+        val c = card(14)
+        c.addView(sectionTitle("Tap Otomatis"))
+        c.addView(sNote("Mengetuk satu titik layar berulang-ulang tanpa menahan tombol, misalnya untuk mendorong cerita (story) yang harus diketuk terus. " +
+            "Nyalakan dari panel Space (tab Combo): geser lingkaran bidik ke titik yang mau diketuk, lalu tekan tombol TAP."), lpTop(2))
+        c.addView(tv("Di game online, auto-tap bisa melanggar aturan dan berisiko akun di-ban. Pakai untuk mode cerita atau game offline.", 10.5f, Pal.WARN), lpTop(4))
+
+        val ms = Prefs.int(this, "at_ms", 500)
+        val pre = AutoTapLogic.PRESETS
+        c.addView(sTitle("Selang antar ketukan"), lpTop(12))
+        c.addView(pillGrid(pre.map { AutoTapLogic.intervalLabel(it) }, pre.indexOf(ms), 5) { Prefs.setInt(this, "at_ms", pre[it]); render() }, lpTop(6))
+        c.addView(sNote("Sekarang " + AutoTapLogic.intervalLabel(ms) + " (" + AutoTapLogic.rateText(ms) + "). Bisa diatur lebih halus dengan slider di panel Space."), lpTop(6))
+
+        val jit = Prefs.int(this, "at_jit", 0)
+        c.addView(sTitle("Acak jeda"), lpTop(12))
+        c.addView(pillGrid(AutoTapLogic.JITTERS.map { if (it == 0) "Mati" else "±$it%" }, AutoTapLogic.JITTERS.indexOf(jit), 4) { Prefs.setInt(this, "at_jit", AutoTapLogic.JITTERS[it]); render() }, lpTop(6))
+        c.addView(sNote("Menambah variasi acak pada jeda supaya ketukan tidak terlalu seragam."), lpTop(6))
+
+        val down = Prefs.int(this, "at_down", 30)
+        c.addView(sTitle("Lama sentuh tiap ketukan"), lpTop(12))
+        c.addView(pillGrid(AutoTapLogic.DOWN_MS.map { "$it ms" }, AutoTapLogic.DOWN_MS.indexOf(down), 4) { Prefs.setInt(this, "at_down", AutoTapLogic.DOWN_MS[it]); render() }, lpTop(6))
+        c.addView(sNote("Naikkan bila ada game yang tidak merespons ketukan yang terlalu singkat."), lpTop(6))
+
+        val lim = Prefs.int(this, "at_limit", 0)
+        c.addView(sTitle("Berhenti otomatis setelah"), lpTop(12))
+        c.addView(pillGrid(AutoTapLogic.LIMITS.map { if (it == 0) "Tanpa batas" else "$it mnt" }, AutoTapLogic.LIMITS.indexOf(lim), 5) { Prefs.setInt(this, "at_limit", AutoTapLogic.LIMITS[it]); render() }, lpTop(6))
+        c.addView(sNote("Tap Otomatis juga berhenti sendiri saat keluar dari game atau layar mati."), lpTop(6))
+        return c
+    }
+
     private fun restoreNow() {
         Thread {
             GameActions(this).restoreAll(null)
@@ -1399,6 +1803,19 @@ class MainActivity : Activity() {
     }
 
     private fun changelog(): String =
+        "v1.9\n" +
+        " • Optimasi dex2oat (tab Game): kompilasi kode game di muka dengan mode Speed Profile / Speed / Everything, per game atau semua sekaligus, lengkap dengan status tiap game dan tombol Reset. Berjalan terpisah sehingga HUD tidak macet. Butuh Shizuku\n" +
+        " • Tap Otomatis: ketuk satu titik berulang tanpa menahan tombol, cocok untuk mendorong cerita (story). Titik bidik bisa digeser, selang 50 ms - 3 dtk, acak jeda, lama sentuh, dan batas waktu diatur di Info. Berhenti sendiri saat keluar game atau layar mati\n" +
+        " • Knob panel Space berwarna RGB dan selalu tampil selama merekam layar, jadi kelihatan sekilas bahwa rekaman berjalan (bisa dimatikan di Info)\n" +
+        " • HUD PC: daya (PWR) kini bertanda + saat mengisi daya dan - saat dipakai, hijau saat mengisi, jadi tahu HP sedang dicas atau tidak\n" +
+        " • Perbaikan: status jaringan di kapsul HUD tidak lagi menampilkan OFF saat Wi-Fi/data aktif (bisa juga VPN / LAN), ping mencoba beberapa alamat dan tidak lagi menahan pembacaan FPS\n" +
+        " • Perbaikan: menu samping dashboard (Beranda, Game, Rekam, Laporan, Info) kini bisa digeser atas-bawah, dan halaman tidak lagi lompat ke atas setiap kali pengaturan diubah\n\n" +
+        "v1.8\n" +
+        " • Statistik waktu bermain (tab Laporan): total hari ini dan 7 hari, grafik per hari, serta game yang paling sering dimainkan. Butuh izin Akses penggunaan\n" +
+        " • Pengingat istirahat (Info): banner di atas game tiap 30/45/60/90/120 menit main nonstop. Keluar game kurang dari 5 menit tidak mengulang hitungan. Bawaan mati\n" +
+        " • Rekaman saya (tab Rekam): daftar video hasil rekam layar dengan ukuran dan durasi, bisa diputar, dibagikan, dan dihapus\n" +
+        " • Tile Pengaturan Cepat 'Rekam Layar': mulai atau berhenti merekam dari panel notifikasi\n" +
+        " • Diagnostik bisa disalin dan dibagikan, kini memuat info perekam layar (encoder, pengaturan, error terakhir) untuk laporan masalah\n\n" +
         "v1.7\n" +
         " • Perekam Layar bawaan (tab Rekam): ukuran layar (preset + kustom), bit rate video, codec H.264 / MPEG_4_SP / H.265 (HEVC), frame rate, audio (sumber internal / internal + mic / mic, bit rate, sample rate, stereo/mono), file baru otomatis saat mencapai batas ukuran (100-4000 MB) tanpa menghentikan rekaman, dan lokasi penyimpanan\n" +
         " • Overlay kapsul: bagian jaringan kini menampilkan PING (contoh 1ms, maks 999ms) berwarna: <=50 hijau, 51-100 kuning, >100 merah. Teks WIFI / DATA tetap di bawahnya\n" +
@@ -1438,7 +1855,8 @@ class MainActivity : Activity() {
         " • Dashboard & overlay didesain ulang, warna per mode, Rekam Performa, GPU Lock, Tampilan, Rekam Layar, E-Sport, dll\n\n" +
         "v1.0\n • Rilis awal"
 
-    private fun showText(title: String, text: String, neutral: Pair<String, () -> Unit>? = null) {
+    private fun showText(title: String, text: String, neutral: Pair<String, () -> Unit>? = null, negative: Pair<String, () -> Unit>? = null) {
+        if (isFinishing || isDestroyed) return
         val t = tv(text, 11f, Pal.TEXT)
         t.typeface = Typeface.MONOSPACE
         t.setPadding(dp(20), dp(10), dp(20), dp(10))
@@ -1447,6 +1865,7 @@ class MainActivity : Activity() {
         sv.addView(t)
         val b = AlertDialog.Builder(this).setTitle(title).setView(sv).setPositiveButton("Tutup", null)
         if (neutral != null) b.setNeutralButton(neutral.first) { _, _ -> neutral.second() }
+        if (negative != null) b.setNegativeButton(negative.first) { _, _ -> negative.second() }
         b.show()
     }
 
@@ -1485,9 +1904,18 @@ class MainActivity : Activity() {
             sb.append("  node load : ").append(h.gLoadNode.ifEmpty { "-" }).append("\n")
             sb.append("  suhu CPU  : ").append(h.cpuTempNode.ifEmpty { "-" }).append("\n\n")
             sb.append("Sumber FPS: ").append(AlyaAiService.fpsSource).append("\n")
-            sb.append("Setelan menunggu dipulihkan: ").append(Cfg.pending(this)).append("\n\n")
+            sb.append("Setelan menunggu dipulihkan: ").append(Cfg.pending(this)).append("\n")
+            sb.append("Encoder   : ").append(RecLogic.CODEC_NAMES.filterIndexed { i, _ -> Recorder.encoderSupported(RecLogic.CODEC_MIME[i]) }.joinToString(", "))
+                .append("  •  audio internal ").append(if (Build.VERSION.SDK_INT >= 29) "didukung" else "butuh Android 10+").append("\n")
+            val rs = try { RecSettings.load(this, false) } catch (_: Throwable) { null }
+            if (rs != null) sb.append("Pengaturan rekam: ").append(rs.w).append('x').append(rs.h).append(' ').append(rs.fps).append("fps ")
+                .append(rs.videoBps / 1_000_000).append("Mbps ").append(RecLogic.CODEC_NAMES[rs.codec]).append(" audio=").append(rs.audio)
+                .append(" split=").append(rs.splitBytes / 1_048_576L).append("MB").append(if (rs.notes.isEmpty()) "" else "  (" + rs.notes.joinToString("; ") + ")").append("\n")
+            sb.append("Rekam layar: ").append(if (RecorderService.recording) "sedang merekam" else "siap").append("  •  gagal terakhir: ")
+                .append(RecorderService.lastError.ifEmpty { "-" }).append("\n\n")
             sb.append("Log aksi:\n").append(ActionLog.dump())
-            runOnUiThread { showText("Diagnostik", sb.toString()) }
+            val report = sb.toString()
+            runOnUiThread { showText("Diagnostik", report, Pair("Salin") { copyText("Diagnostik Game Space", report) }, Pair("Bagikan") { shareText("Diagnostik Game Space", report) }) }
         }.start()
     }
 }

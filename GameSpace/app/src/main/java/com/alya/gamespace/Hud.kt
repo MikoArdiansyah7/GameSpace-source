@@ -10,6 +10,7 @@ import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
 import android.os.Build
+import android.os.SystemClock
 import android.view.View
 import android.view.WindowManager
 
@@ -132,7 +133,7 @@ class HudView(ctx: Context) : View(ctx) {
                 p.setShadowLayer(dp(2).toFloat(), 0f, dp(1).toFloat(), 0xCC000000.toInt())
                 txt(c, cx, cy, Logic.pingText(ping), 10.5f, Logic.pingColor(ping), true)
                 p.clearShadowLayer()
-                caption(c, cx, if (net == 1) "WIFI" else if (net == 2) "DATA" else "OFF")
+                caption(c, cx, NetLogic.caption(net, ping))
             }
             2 -> ring(c, cx, cy, cpu.toFloat(), a, if (cpu >= 0) cpu.toString() else "--", "CPU")
             3 -> ring(c, cx, cy, gpu.toFloat(), a, if (gpu >= 0) gpu.toString() else "--", "GPU")
@@ -152,11 +153,23 @@ class HudView(ctx: Context) : View(ctx) {
 class KnobView(ctx: Context) : View(ctx) {
     var alone = true
     var blur = false
+    /** Mode RGB: warna berputar selama layar direkam, supaya terlihat sekilas bahwa rekaman sedang berjalan. */
+    var rgb = false
+        private set
     private val p = Paint(Paint.ANTI_ALIAS_FLAG)
     private val rect = RectF()
+    private val hsv = floatArrayOf(0f, 0.85f, 1f)
+
+    fun setRgb(on: Boolean) { if (rgb == on) return; rgb = on; invalidate() }
+
+    private fun hue(deg: Float): Int { hsv[0] = ((deg % 360f) + 360f) % 360f; return Color.HSVToColor(hsv) }
+
+    private fun rainbow(w: Float, t: Float) = LinearGradient(0f, 0f, w, 0f,
+        intArrayOf(hue(t), hue(t + 90f), hue(t + 180f), hue(t + 270f)), null, Shader.TileMode.CLAMP)
 
     override fun onDraw(c: Canvas) {
         val w = width.toFloat(); val h = height.toFloat()
+        val t = if (rgb) (SystemClock.uptimeMillis() % 2400L) / 2400f * 360f else 0f
         if (alone) {
             rect.set(0f, 0f, w, h)
             val r = h / 2f
@@ -165,16 +178,26 @@ class KnobView(ctx: Context) : View(ctx) {
             else LinearGradient(0f, 0f, 0f, h, 0xEE1B1838.toInt(), 0xF50B0A17.toInt(), Shader.TileMode.CLAMP)
             c.drawRoundRect(rect, r, r, p)
             p.shader = null
-            p.style = Paint.Style.STROKE; p.strokeWidth = dp(1).toFloat(); p.color = 0x70FFFFFF
-            rect.inset(0.5f, 0.5f)
+            p.style = Paint.Style.STROKE
+            if (rgb) { p.strokeWidth = dp(2).toFloat(); p.shader = rainbow(w, t); rect.inset(1f, 1f) }
+            else { p.strokeWidth = dp(1).toFloat(); p.color = 0x70FFFFFF; rect.inset(0.5f, 0.5f) }
             c.drawRoundRect(rect, r, r, p)
+            p.shader = null
+        } else if (rgb) {
+            // knob berada di celah kapsul HUD: cincin RGB tipis di sekeliling area knob
+            rect.set(dp(1).toFloat(), dp(1).toFloat(), w - dp(1), h - dp(1))
+            p.style = Paint.Style.STROKE; p.strokeWidth = dp(2).toFloat(); p.shader = rainbow(w, t)
+            c.drawRoundRect(rect, h / 2f, h / 2f, p)
+            p.shader = null
         }
         val bw = dp(24).toFloat(); val bh = dp(6).toFloat()
         rect.set((w - bw) / 2f, (h - bh) / 2f, (w + bw) / 2f, (h + bh) / 2f)
         p.style = Paint.Style.FILL
-        p.shader = LinearGradient(rect.left, 0f, rect.right, 0f, Skin.a, Skin.b, Shader.TileMode.CLAMP)
+        p.shader = if (rgb) LinearGradient(rect.left, 0f, rect.right, 0f, hue(t), hue(t + 140f), Shader.TileMode.CLAMP)
+        else LinearGradient(rect.left, 0f, rect.right, 0f, Skin.a, Skin.b, Shader.TileMode.CLAMP)
         c.drawRoundRect(rect, bh / 2f, bh / 2f, p)
         p.shader = null
+        if (rgb) postInvalidateDelayed(33)   // ~30 fps, hanya selama merekam layar
     }
 }
 
@@ -188,6 +211,7 @@ class PcHudView(ctx: Context) : View(ctx) {
     var cpu = -1
     var ram = -1
     var watt = -1f
+    var charging = false
     var temp = 0f
     var fps = 0f
     val show = BooleanArray(8) { true }
@@ -230,7 +254,7 @@ class PcHudView(ctx: Context) : View(ctx) {
         if (show[1]) l.add(Seg("GPU", Logic.pcPct(gpu), cGreen))
         if (show[2]) l.add(Seg("CPU", Logic.pcPct(cpu), cOrange))
         if (show[3]) l.add(Seg("RAM", Logic.pcPct(ram), cBlue))
-        if (show[4]) l.add(Seg("PWR", Logic.pcWatt(watt), cPurple))
+        if (show[4]) l.add(Seg("PWR", Logic.pcWatt(watt, charging), cPurple))
         if (show[5]) l.add(Seg("TMP", Logic.pcTemp(temp), cRed))
         if (show[6]) l.add(Seg("FPS", Logic.pcFps(fps), cYellow))
         return l
@@ -282,7 +306,7 @@ class PcHudView(ctx: Context) : View(ctx) {
             x += cw * sg.label.length
             if (sg.value.isNotEmpty()) {
                 x += cw
-                p.color = if (sg.label == "FPS" && fpsColored) Logic.fpsColor(fps) else Color.WHITE
+                p.color = if (sg.label == "FPS" && fpsColored) Logic.fpsColor(fps) else if (sg.label == "PWR" && charging && watt >= 0f) 0xFF4ADE80.toInt() else Color.WHITE
                 c.drawText(sg.value, x, base, p)
                 x += cw * sg.value.length
             }

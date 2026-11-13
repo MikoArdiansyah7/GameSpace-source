@@ -31,7 +31,35 @@ object Perm {
 }
 
 object Stats {
-    private var lastPing = -1
+    @Volatile private var lastPing = -1
+    private val pinging = java.util.concurrent.atomic.AtomicBoolean(false)
+    private val pingHosts = arrayOf("1.1.1.1", "8.8.8.8", "9.9.9.9", "208.67.222.222")
+    @Volatile private var pingIdx = 0
+
+    private fun tcpPing(host: String, timeoutMs: Int): Int = try {
+        val t = System.nanoTime()
+        Socket().use { it.connect(InetSocketAddress(host, 443), timeoutMs) }
+        Math.max(1L, (System.nanoTime() - t) / 1_000_000L).toInt()
+    } catch (_: Throwable) { -1 }
+
+    /**
+     * Ping di thread sendiri supaya tidak menahan loop statistik (FPS/HUD) saat jaringan lambat. Mencoba beberapa alamat
+     * (satu alamat bisa diblokir operator); alamat yang berhasil diingat dan dicoba duluan pada ping berikutnya.
+     */
+    private fun pingAsync() {
+        if (!pinging.compareAndSet(false, true)) return
+        Thread {
+            try {
+                var res = -1
+                for (k in pingHosts.indices) {
+                    val i = (pingIdx + k) % pingHosts.size
+                    val ms = tcpPing(pingHosts[i], if (k == 0) 1200 else 700)
+                    if (ms >= 0) { pingIdx = i; res = ms; break }
+                }
+                lastPing = res
+            } finally { pinging.set(false) }
+        }.also { it.isDaemon = true; it.name = "gs-ping" }.start()
+    }
     private var prevTotal = 0L
     private var prevIdle = 0L
     private var script: String? = null
@@ -112,11 +140,7 @@ object Stats {
             }
         } catch (_: Throwable) {}
 
-        if (doPing) lastPing = try {
-            val t = System.nanoTime()
-            Socket().use { it.connect(InetSocketAddress("1.1.1.1", 443), 1000) }
-            ((System.nanoTime() - t) / 1_000_000).toInt()
-        } catch (_: Throwable) { -1 }
+        if (doPing) pingAsync()
 
         val fps = if (game != null) meter.sample(game) else 0f
         return Snap(if (cpuMax > 0) cpuMax / 1_000_000f else -1f, load, (gKhz / 1000).toInt().let { if (it > 0) it else -1 },
