@@ -1,0 +1,11 @@
+echo "@C"
+for p in /sys/devices/system/cpu/cpufreq/policy*; do f=""; { read -r f < "$p/scaling_cur_freq"; } 2>/dev/null; echo "$f"; done
+echo "@S"
+l=""; { read -r l < /proc/stat; } 2>/dev/null; echo "$l"
+echo "@GF"
+g=""; { read -r g < @GFREQ@; } 2>/dev/null; echo "$g"
+echo "@GL"
+g=""; { read -r g < @GLOAD@; } 2>/dev/null; echo "$g"
+echo "@T"
+g=""; { read -r g < @CTEMP@; } 2>/dev/null; echo "$g"
+echo "@E"
