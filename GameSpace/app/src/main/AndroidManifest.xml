@@ -64,6 +64,7 @@
             android:name=".ProjectionActivity"
             android:exported="false"
             android:excludeFromRecents="true"
+            android:taskAffinity=""
             android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
         <service

@@ -11,8 +11,8 @@ KOTLINC=$T/kt/kotlinc/bin/kotlinc
 STD=$T/kt/kotlinc/lib/kotlin-stdlib.jar
 DXJAR=/usr/lib/android-sdk/build-tools/debian/lib/dx.jar
 SHZ=$T/shz
-VCODE=10
-VNAME=1.9
+VCODE=11
+VNAME=1.9.1
 OUT=/mnt/user-data/outputs/GameSpace-v$VNAME.apk
 stage=${1:-all}
 

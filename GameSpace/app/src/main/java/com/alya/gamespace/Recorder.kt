@@ -424,7 +424,8 @@ class RecorderService : Service() {
         private const val NID = 7
 
         fun requestStart(ctx: Context) {
-            ctx.startActivity(Intent(ctx, ProjectionActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            // task sendiri (taskAffinity kosong di manifest) + tanpa animasi: jendela izin muncul di atas game, dashboard tidak ikut terbawa ke depan
+            ctx.startActivity(Intent(ctx, ProjectionActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION))
         }
         fun requestStop(ctx: Context) {
             ctx.startService(Intent(ctx, RecorderService::class.java).setAction(ACTION_STOP))

@@ -234,21 +234,21 @@ class MainActivity : Activity() {
         railSv = sv
         val col = LinearLayout(this)
         col.orientation = LinearLayout.VERTICAL; col.gravity = Gravity.CENTER_HORIZONTAL
-        col.setPadding(dp(8), dp(10), dp(8), dp(10))
+        col.setPadding(dp(8), dp(6), dp(8), dp(6))
         col.setBackgroundColor(0x77050410)
         val logo = ImageView(this)
         logo.setImageResource(R.drawable.art_icon)
-        col.addView(logo, LinearLayout.LayoutParams(dp(48), dp(48)).apply { bottomMargin = dp(10) })
+        col.addView(logo, LinearLayout.LayoutParams(dp(40), dp(40)).apply { bottomMargin = dp(6) })
         val items = listOf(Pair(Ic.HOME, "Beranda"), Pair(Ic.GAMES, "Game"), Pair(Ic.VIDEO, "Rekam"), Pair(Ic.CHART, "Laporan"), Pair(Ic.GEAR, "Info"))
         for (i in items.indices) {
             val v = LinearLayout(this)
             v.orientation = LinearLayout.VERTICAL; v.gravity = Gravity.CENTER
-            v.setPadding(0, dp(6), 0, dp(6))
+            v.setPadding(0, dp(4), 0, dp(4))
             if (tab == i) v.background = gbox(Skin.a, Skin.b, dpf(14), GradientDrawable.Orientation.TL_BR)
-            v.addView(IconView(this, items[i].first, if (tab == i) Color.WHITE else Pal.MUTED), LinearLayout.LayoutParams(dp(24), dp(24)).apply { bottomMargin = dp(2) })
+            v.addView(IconView(this, items[i].first, if (tab == i) Color.WHITE else Pal.MUTED), LinearLayout.LayoutParams(dp(22), dp(22)).apply { bottomMargin = dp(2) })
             v.addView(tv(items[i].second, 9.5f, if (tab == i) Color.WHITE else Pal.MUTED, true))
             v.setOnClickListener { tab = i; openRec = null; render() }
-            col.addView(v, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(4) })
+            col.addView(v, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(2) })
         }
         sv.addView(col, FrameLayout.LayoutParams(-1, -2))
         return sv
@@ -1803,6 +1803,10 @@ class MainActivity : Activity() {
     }
 
     private fun changelog(): String =
+        "v1.9.1\n" +
+        " • Perbaikan: tombol Rekam Layar di panel Space tidak lagi melempar ke dashboard saat sedang di dalam game. Jendela izin rekam kini muncul di atas game dan setelah itu langsung kembali ke game\n" +
+        " • Menu samping dashboard dipadatkan sehingga kelima menu (Beranda, Game, Rekam, Laporan, Info) langsung terlihat penuh di layar landscape pendek, dan tetap bisa digeser atas-bawah bila layar sangat pendek\n" +
+        " • Berisi semua pembaruan v1.9: optimasi dex2oat, Tap Otomatis, knob RGB saat merekam, tanda +/- daya di HUD PC, perbaikan status jaringan, scroll tidak lompat ke atas, dan perbaikan crash. Lihat Riwayat versi\n\n" +
         "v1.9\n" +
         " • Optimasi dex2oat (tab Game): kompilasi kode game di muka dengan mode Speed Profile / Speed / Everything, per game atau semua sekaligus, lengkap dengan status tiap game dan tombol Reset. Berjalan terpisah sehingga HUD tidak macet. Butuh Shizuku\n" +
         " • Tap Otomatis: ketuk satu titik berulang tanpa menahan tombol, cocok untuk mendorong cerita (story). Titik bidik bisa digeser, selang 50 ms - 3 dtk, acak jeda, lama sentuh, dan batas waktu diatur di Info. Berhenti sendiri saat keluar game atau layar mati\n" +

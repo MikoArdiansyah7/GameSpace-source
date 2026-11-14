@@ -15,7 +15,7 @@ APK yang diperbarui harus ditandatangani kunci yang SAMA dengan versi terpasang.
 
 Sidik jari sertifikat (SHA-256):
 - v1.0 - v1.6 (kunci lama, sudah hilang): b8ab581db8c6018e46643d5dff2b2204e24067254a53feb0f06318af379cd27d
-- v1.7, v1.8, v1.9 dan seterusnya (kunci saat ini):  ccca159b32c701485acaad6784ed29f707cb468edfcaa25c8a549794f612f076
+- v1.7, v1.8, v1.9, v1.9.1 dan seterusnya (kunci saat ini):  ccca159b32c701485acaad6784ed29f707cb468edfcaa25c8a549794f612f076
 
 ## version.json (Pusat Pembaruan di dalam aplikasi)
 Format: versionCode, versionName, apkUrl (https), sha256, notes. Isi `apkUrl` dengan link unduhan APK, host file ini lewat https lalu isi URL-nya di Info > Pembaruan.
