@@ -25,7 +25,7 @@ class RecTileService : TileService() {
 
     private fun act() {
         if (RecorderService.recording) {
-            RecorderService.requestStop(this)
+            RecorderService.requestStop(this, "tile")
             refresh()
             return
         }

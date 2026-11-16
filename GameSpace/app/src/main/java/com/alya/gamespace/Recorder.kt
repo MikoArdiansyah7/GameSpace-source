@@ -187,6 +187,7 @@ class RecEngine(private val ctx: Context, private val proj: MediaProjection, pri
     private var aThread: Thread? = null
     private var began = false
     @Volatile private var stopDeadline = Long.MAX_VALUE
+    @Volatile private var vFormatAt = 0L
     private val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
 
     private fun nowUs() = System.nanoTime() / 1000L
@@ -314,13 +315,19 @@ class RecEngine(private val ctx: Context, private val proj: MediaProjection, pri
         try {
             while (true) {
                 val idx = c.dequeueOutputBuffer(info, 10_000)
-                if (idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) { vFormat = c.outputFormat; formatsReady() }
+                if (idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) { vFormat = c.outputFormat; vFormatAt = System.currentTimeMillis(); formatsReady() }
                 else if (idx >= 0) {
                     val buf = c.getOutputBuffer(idx)
                     if (buf != null && info.size > 0 && (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0)
                         writer?.video(buf, info.offset, info.size, info.presentationTimeUs, info.flags)
                     c.releaseOutputBuffer(idx, false)
                     if ((info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) break
+                }
+                // audio belum siap setelah beberapa saat: jangan buang video terus, mulai dulu tanpa suara
+                if (RecStopLogic.audioWaitExpired(vFormatAt, System.currentTimeMillis(), aFormat != null, began)) {
+                    audioActive = false
+                    ActionLog.add("Rekam layar: audio belum siap setelah 1,5 dtk, video direkam dulu tanpa suara")
+                    formatsReady()
                 }
                 if (!running && System.currentTimeMillis() > stopDeadline) break
             }
@@ -417,6 +424,7 @@ class RecorderService : Service() {
         @Volatile var files = 0
         @Volatile var bytes = 0L
         @Volatile var lastError = ""
+        @Volatile var lastStop = ""
         val listeners = java.util.concurrent.CopyOnWriteArrayList<() -> Unit>()
         fun notifyState() { for (l in listeners) try { l() } catch (_: Throwable) {} }
         const val ACTION_STOP = "com.alya.gamespace.REC_STOP"
@@ -427,8 +435,8 @@ class RecorderService : Service() {
             // task sendiri (taskAffinity kosong di manifest) + tanpa animasi: jendela izin muncul di atas game, dashboard tidak ikut terbawa ke depan
             ctx.startActivity(Intent(ctx, ProjectionActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION))
         }
-        fun requestStop(ctx: Context) {
-            ctx.startService(Intent(ctx, RecorderService::class.java).setAction(ACTION_STOP))
+        fun requestStop(ctx: Context, from: String = "?") {
+            ctx.startService(Intent(ctx, RecorderService::class.java).setAction(ACTION_STOP).putExtra("from", from))
         }
         fun clock(sec: Long): String = String.format(Locale.US, "%02d:%02d", sec / 60, sec % 60)
     }
@@ -440,7 +448,7 @@ class RecorderService : Service() {
             val e = engine ?: return
             if (!recording) return
             files = e.files; bytes = e.bytes
-            (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).notify(NID, notif())
+            try { (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).notify(NID, notif()) } catch (_: Throwable) {}
             h.postDelayed(this, 1000)
         }
     }
@@ -454,7 +462,7 @@ class RecorderService : Service() {
     }
 
     private fun notif(): Notification {
-        val stop = PendingIntent.getService(this, 1, Intent(this, RecorderService::class.java).setAction(ACTION_STOP),
+        val stop = PendingIntent.getService(this, 1, Intent(this, RecorderService::class.java).setAction(ACTION_STOP).putExtra("from", "notifikasi"),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         val el = if (recording) (System.currentTimeMillis() - startedAt) / 1000 else 0L
         val text = if (recording) "Merekam " + clock(el) + "  •  " + files + " file  •  " + (bytes / 1_048_576L) + " MB" else "Menyiapkan perekam..."
@@ -465,7 +473,7 @@ class RecorderService : Service() {
 
     @Suppress("DEPRECATION")
     override fun onStartCommand(i: Intent?, f: Int, id: Int): Int {
-        if (i?.action == ACTION_STOP) { stopRec(); stopSelf(); return START_NOT_STICKY }
+        if (i?.action == ACTION_STOP) { stopRec("dihentikan dari " + (i.getStringExtra("from") ?: "?")); stopSelf(); return START_NOT_STICKY }
         val data = i?.getParcelableExtra<Intent>("data")
         if (data == null || recording) { if (!recording) stopSelf(); return START_NOT_STICKY }
         begin(i.getIntExtra("code", 0), data, i.getBooleanExtra("noAudio", false))
@@ -486,7 +494,7 @@ class RecorderService : Service() {
             val mpm = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
             val p = mpm.getMediaProjection(code, data) ?: throw IllegalStateException("Izin rekam layar tidak valid")
             p.registerCallback(object : MediaProjection.Callback() {
-                override fun onStop() { h.post { stopRec(); stopSelf() } }
+                override fun onStop() { h.post { stopRec("Android menghentikan proyeksi layar", true); stopSelf() } }
             }, h)
             val e = RecEngine(this, p, st) { msg -> h.post { fail(msg) } }
             started = e
@@ -514,23 +522,27 @@ class RecorderService : Service() {
         lastError = msg
         ActionLog.add("Rekam layar gagal: $msg")
         toast("Perekaman gagal: $msg")
-        stopRec()
+        stopRec("error: $msg", true)
         stopSelf()
     }
 
-    private fun stopRec() {
+    private fun stopRec(reason: String, abnormal: Boolean = false) {
         val e = engine
         engine = null
         if (e != null) {
+            val sec = if (startedAt > 0L) (System.currentTimeMillis() - startedAt) / 1000 else 0L
+            lastStop = RecStopLogic.describeStop(reason, sec)
+            ActionLog.add("Rekam layar berhenti: " + lastStop)
             e.stop()
-            toast("Rekaman tersimpan: " + e.files + " file (" + (e.bytes / 1_048_576L) + " MB) di " + RecStorage.label(this))
+            toast((if (abnormal) "Rekaman berhenti: " + reason + ". " else "") +
+                "Rekaman tersimpan: " + e.files + " file (" + (e.bytes / 1_048_576L) + " MB) di " + RecStorage.label(this))
         }
         recording = false
         h.removeCallbacks(tick)
         notifyState()
     }
 
-    override fun onDestroy() { stopRec(); super.onDestroy() }
+    override fun onDestroy() { stopRec("layanan perekam dimatikan", true); super.onDestroy() }
 }
 
 /** Layar transparan untuk meminta izin rekam layar (dan mikrofon), lalu menyalakan RecorderService. */
@@ -541,7 +553,8 @@ class ProjectionActivity : Activity() {
 
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
-        if (RecorderService.recording) { RecorderService.requestStop(this); finish(); return }
+        // sedang merekam: abaikan (peluncuran ganda tidak boleh menghentikan rekaman; berhenti lewat panel/dashboard/tile/notifikasi)
+        if (RecorderService.recording) { finish(); return }
         if (Prefs.bool(this, "rec_audio", true) && checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED)
             requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), reqAudio)
         else askProjection()
@@ -559,7 +572,12 @@ class ProjectionActivity : Activity() {
     @Suppress("DEPRECATION")
     private fun askProjection() {
         val mpm = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        try { startActivityForResult(mpm.createScreenCaptureIntent(), reqProj) }
+        val intent = if (Build.VERSION.SDK_INT >= 34) {
+            // Android 14+: hanya opsi 'seluruh layar' (tanpa 'bagikan satu aplikasi' yang bisa mengakhiri rekaman sendiri)
+            try { mpm.createScreenCaptureIntent(android.media.projection.MediaProjectionConfig.createConfigForDefaultDisplay()) }
+            catch (_: Throwable) { mpm.createScreenCaptureIntent() }
+        } else mpm.createScreenCaptureIntent()
+        try { startActivityForResult(intent, reqProj) }
         catch (_: Throwable) { Toast.makeText(this, "Perekaman layar tidak tersedia di perangkat ini", Toast.LENGTH_LONG).show(); finish() }
     }
 

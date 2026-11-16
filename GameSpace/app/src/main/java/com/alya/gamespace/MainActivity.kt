@@ -1326,7 +1326,7 @@ class MainActivity : Activity() {
         t.addView(tv("Tips: tambahkan tile 'Rekam Layar' di Pengaturan Cepat (tarik panel notifikasi, ikon pensil) untuk mulai atau berhenti merekam tanpa membuka aplikasi. Selama merekam, knob panel Space berganti warna RGB (bisa dimatikan di Info).", 10.5f, Skin.a), lpTop(4))
         row.addView(t, LinearLayout.LayoutParams(0, -2, 1f))
         row.addView(btn(if (rec) "Berhenti" else "Mulai rekam", !rec, if (rec) Ic.STOP else Ic.RECORD) {
-            if (RecorderService.recording) RecorderService.requestStop(this) else startActivity(Intent(this, ProjectionActivity::class.java))
+            if (RecorderService.recording) RecorderService.requestStop(this, "dashboard") else startActivity(Intent(this, ProjectionActivity::class.java))
             root.postDelayed({ render() }, 1800)
         })
         c.addView(row)
@@ -1803,6 +1803,12 @@ class MainActivity : Activity() {
     }
 
     private fun changelog(): String =
+        "v1.9.2\n" +
+        " • Perbaikan perekam layar: rekaman tidak lagi menunggu audio tanpa batas sebelum mulai (bila audio belum siap dalam 1,5 detik, video direkam dulu tanpa suara), sehingga tidak ada lagi bagian awal yang hilang atau rekaman yang terpotong\n" +
+        " • Membuka jendela izin rekam saat sedang merekam tidak lagi menghentikan rekaman\n" +
+        " • Android 14+: izin rekam langsung 'seluruh layar' (tanpa opsi 'bagikan satu aplikasi' yang bisa mengakhiri rekaman sendiri)\n" +
+        " • Alasan rekaman berhenti kini dicatat dan tampil di Diagnostik (dihentikan dari panel, dashboard, tile, atau notifikasi, atau dihentikan Android), untuk melacak rekaman yang berhenti sendiri\n" +
+        " • Berisi semua pembaruan v1.9.1\n\n" +
         "v1.9.1\n" +
         " • Perbaikan: tombol Rekam Layar di panel Space tidak lagi melempar ke dashboard saat sedang di dalam game. Jendela izin rekam kini muncul di atas game dan setelah itu langsung kembali ke game\n" +
         " • Menu samping dashboard dipadatkan sehingga kelima menu (Beranda, Game, Rekam, Laporan, Info) langsung terlihat penuh di layar landscape pendek, dan tetap bisa digeser atas-bawah bila layar sangat pendek\n" +
@@ -1916,7 +1922,8 @@ class MainActivity : Activity() {
                 .append(rs.videoBps / 1_000_000).append("Mbps ").append(RecLogic.CODEC_NAMES[rs.codec]).append(" audio=").append(rs.audio)
                 .append(" split=").append(rs.splitBytes / 1_048_576L).append("MB").append(if (rs.notes.isEmpty()) "" else "  (" + rs.notes.joinToString("; ") + ")").append("\n")
             sb.append("Rekam layar: ").append(if (RecorderService.recording) "sedang merekam" else "siap").append("  •  gagal terakhir: ")
-                .append(RecorderService.lastError.ifEmpty { "-" }).append("\n\n")
+                .append(RecorderService.lastError.ifEmpty { "-" }).append("\n")
+                .append("Berhenti terakhir: ").append(RecorderService.lastStop.ifEmpty { "-" }).append("\n\n")
             sb.append("Log aksi:\n").append(ActionLog.dump())
             val report = sb.toString()
             runOnUiThread { showText("Diagnostik", report, Pair("Salin") { copyText("Diagnostik Game Space", report) }, Pair("Bagikan") { shareText("Diagnostik Game Space", report) }) }

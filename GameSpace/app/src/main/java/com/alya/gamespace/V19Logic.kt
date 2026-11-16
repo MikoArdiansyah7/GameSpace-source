@@ -171,3 +171,15 @@ object NetLogic {
         else -> "OFF"
     }
 }
+
+/** Logika murni perekam layar: batas tunggu audio dan teks alasan berhenti. */
+object RecStopLogic {
+    /** Muxer tidak boleh menunggu format audio selamanya: lewat batas ini video direkam dulu tanpa suara. */
+    const val AUDIO_WAIT_MS = 1500L
+
+    fun audioWaitExpired(vFormatAtMs: Long, nowMs: Long, audioReady: Boolean, began: Boolean): Boolean =
+        !began && !audioReady && vFormatAtMs > 0L && nowMs - vFormatAtMs >= AUDIO_WAIT_MS
+
+    /** "dihentikan dari panel setelah 2 dtk". */
+    fun describeStop(reason: String, elapsedSec: Long): String = reason + " setelah " + Math.max(0L, elapsedSec) + " dtk"
+}

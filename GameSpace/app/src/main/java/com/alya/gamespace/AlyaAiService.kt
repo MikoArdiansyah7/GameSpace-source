@@ -250,13 +250,15 @@ class AlyaAiService : Service(), PanelCallbacks {
 
     /** Selama merekam layar: knob dipaksa tampil dan berwarna RGB; setelah selesai kembali seperti biasa. */
     private fun applyRecKnob() {
-        if (recRgbOn()) {
-            if (knobView == null) showKnob()
-            knobView?.setRgb(true)
-        } else {
-            knobView?.setRgb(false)
-            if (knobView != null && game == null && !Prefs.bool(this, "always", false)) hideKnob()
-        }
+        try {
+            if (recRgbOn()) {
+                if (knobView == null) showKnob()
+                knobView?.setRgb(true)
+            } else {
+                knobView?.setRgb(false)
+                if (knobView != null && game == null && !Prefs.bool(this, "always", false)) hideKnob()
+            }
+        } catch (t: Throwable) { ActionLog.add("knob RGB: " + t.javaClass.simpleName) }
     }
 
     // ───────── Tap Otomatis ─────────
@@ -1217,7 +1219,7 @@ class AlyaAiService : Service(), PanelCallbacks {
                     announce("$n app latar dipulihkan", 3, Ic.CHECK)
                 }
             }
-            "srec" -> { closePanel(); if (on) RecorderService.requestStart(this) else RecorderService.requestStop(this) }
+            "srec" -> { closePanel(); if (on) RecorderService.requestStart(this) else RecorderService.requestStop(this, "panel") }
             "combo" -> {
                 if (on && !Prefs.bool(this, "combo_ack", false)) {
                     st["combo"] = false; panel?.sync()
